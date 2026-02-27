@@ -1,0 +1,18 @@
+[workspace]
+channels = ["https://repo.prefix.dev/meta-forge", "conda-forge"]
+name = "reconcile"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+test = "pytest tests/"
+
+[dependencies]
+python = ">=3.12"
+pydantic = ">=2"
+pytest = "*"
+
+[pypi-dependencies]
+reconcile = { path = ".", editable = true }
+pyright = "*"
+mypy = "*"
