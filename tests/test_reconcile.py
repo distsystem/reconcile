@@ -52,6 +52,19 @@ class LinearWarmupSchedulerSpec(BaseModel):
         return step * self.lr_min
 
 
+class MultiFieldSpec(BaseModel):
+    num_steps: int = Field(default=Reconciled.UNRESOLVED)
+    lr: float = Field(default=Reconciled.UNRESOLVED)
+
+    @reconcile(num_steps)
+    def _derive_num_steps(self, t: TrainingSpec) -> int:
+        return t.num_steps
+
+    @reconcile(lr)
+    def _derive_lr(self, o: AdamWOptimizerSpec) -> float:
+        return o.lr
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -74,18 +87,30 @@ def test_manual_override():
     )
     assert sched.num_steps == 999
 
+    # Partial override on multi-field model
+    multi, _, _ = reconcile(
+        MultiFieldSpec(lr=1e-2),
+        TrainingSpec(num_steps=3000),
+        AdamWOptimizerSpec(lr=5e-4),
+    )
+    assert multi.lr == 1e-2
+    assert multi.num_steps == 3000
+
 
 def test_multi_participant():
     """3. Realization is user code, not framework protocol."""
-    loss, optim, sched, _training = reconcile(
+    loss, optim, sched, _training, multi = reconcile(
         CrossEntropyLoss(),
         AdamWOptimizerSpec(lr=3e-4),
         LinearWarmupSchedulerSpec(warmup_steps=200),
         TrainingSpec(num_steps=5000),
+        MultiFieldSpec(),
     )
     assert loss("logits", "labels") == "ce_loss(ignore_index=-100)"
     assert optim.lr == 3e-4
     assert sched.num_steps == 5000
+    assert multi.num_steps == 5000
+    assert multi.lr == 3e-4
 
 
 def test_duplicate_type():
@@ -98,6 +123,8 @@ def test_required_unresolved():
     """5. Error: required field unresolved."""
     with pytest.raises(ValueError, match="required but unresolved"):
         reconcile(LinearWarmupSchedulerSpec(warmup_steps=100))
+    with pytest.raises(ValueError, match="required but unresolved"):
+        reconcile(MultiFieldSpec())
 
 
 def test_derivation_validation_error():

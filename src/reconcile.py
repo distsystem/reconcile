@@ -18,6 +18,8 @@ from pydantic.fields import FieldInfo
 # ---------------------------------------------------------------------------
 
 
+# Inherit property so Pydantic treats us as a descriptor rather than
+# replacing the attribute with ModelPrivateAttr during model creation.
 class Reconciled(property):
     UNRESOLVED: Any = object()
 
@@ -49,14 +51,21 @@ class Reconciled(property):
             )
         self.field_name = field_name
 
-        if isinstance(self._sentinel, FieldInfo):
-            self.required = self._sentinel.default is Reconciled.UNRESOLVED
-            if self.required:
-                self._sentinel.default = None
-            ann[field_name] = typing.Annotated[ann[field_name], self._sentinel, self]
-        else:
-            self.required = self._sentinel is Reconciled.UNRESOLVED
-            ann[field_name] = typing.Annotated[ann[field_name], self]
+        if not isinstance(self._sentinel, FieldInfo):
+            raise TypeError(
+                f"{owner.__name__}.{field_name}: sentinel must be a pydantic "
+                f"FieldInfo (use Field(default=Reconciled.UNRESOLVED))"
+            )
+
+        self.required = self._sentinel.default is Reconciled.UNRESOLVED
+        # Replace sentinel with valid default so Pydantic validation accepts it
+        if self.required:
+            self._sentinel.default = None
+        # Move FieldInfo from class-body value into Annotated metadata,
+        # where Pydantic's model metaclass picks it up
+        ann[field_name] = typing.Annotated[ann[field_name], self._sentinel, self]
+        # Replace descriptor on the class with a plain default so
+        # BaseModel.__init__ sees a normal attribute, not our sentinel
         setattr(owner, field_name, None)
 
         owner.__annotations__ = ann
