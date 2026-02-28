@@ -1,7 +1,7 @@
 """reconcile — declarative cross-object field resolution for Pydantic models.
 
-Single entry point ``reconcile`` serves as decorator (field derivation /
-validator) and resolver, dispatched by the first argument.
+``dependency`` declares cross-object field derivations and validators.
+``reconcile`` resolves all dependencies to a consistent state.
 """
 
 import inspect
@@ -21,7 +21,7 @@ from pydantic_core import PydanticUndefined
 
 # Inherit property so Pydantic treats us as a descriptor rather than
 # replacing the attribute with ModelPrivateAttr during model creation.
-class Reconciled(property):
+class Dependency(property):
     fn: Callable[..., Any]
     field_name: str | None
     required: bool
@@ -70,7 +70,23 @@ class Reconciled(property):
 
 
 # ---------------------------------------------------------------------------
-# Unified entry point
+# Decorator
+# ---------------------------------------------------------------------------
+
+
+def dependency(arg: Any = None, /) -> Any:
+    if callable(arg) and not isinstance(arg, FieldInfo):
+        return Dependency(arg)
+    sentinel = arg
+
+    def decorator(fn: Callable[..., Any]) -> Any:
+        return Dependency(fn, sentinel=sentinel)
+
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Resolver
 # ---------------------------------------------------------------------------
 
 
@@ -87,15 +103,15 @@ def _inject_from_pool(
     return True, kwargs
 
 
-def _find_reconciled(cls: type) -> list[tuple[str, Reconciled]]:
+def _find_dependencies(obj: Any) -> list[tuple[str, Dependency]]:
     return [
         (name, attr)
-        for name in dir(cls)
-        if isinstance(attr := getattr(cls, name, None), Reconciled)
+        for name in dir(type(obj))
+        if isinstance(attr := getattr(type(obj), name, None), Dependency)
     ]
 
 
-def _resolve(*participants: Any, max_iterations: int = 10) -> tuple[Any, ...]:
+def reconcile(*participants: Any) -> tuple[Any, ...]:
     pool: dict[type, Any] = {}
     for obj in participants:
         t = type(obj)
@@ -106,7 +122,7 @@ def _resolve(*participants: Any, max_iterations: int = 10) -> tuple[Any, ...]:
     errors: list[str] = []
     ran: set[tuple[type, str]] = set()
 
-    for _ in range(max_iterations):
+    while True:
         progress = False
         for obj in list(pool.values()):
             if not isinstance(obj, BaseModel):
@@ -114,7 +130,7 @@ def _resolve(*participants: Any, max_iterations: int = 10) -> tuple[Any, ...]:
             cls = type(obj)
             updates: dict[str, Any] = {}
 
-            for name, meta in _find_reconciled(cls):
+            for name, meta in _find_dependencies(obj):
                 field = meta.field_name
                 if field is not None:
                     if field in obj.model_fields_set:
@@ -150,7 +166,7 @@ def _resolve(*participants: Any, max_iterations: int = 10) -> tuple[Any, ...]:
         if not isinstance(obj, BaseModel):
             continue
         cls = type(obj)
-        for _name, meta in _find_reconciled(cls):
+        for _name, meta in _find_dependencies(obj):
             if not meta.required or meta.field_name is None:
                 continue
             if meta.field_name in obj.model_fields_set:
@@ -168,22 +184,3 @@ def _resolve(*participants: Any, max_iterations: int = 10) -> tuple[Any, ...]:
         )
 
     return tuple(pool[type(p)] for p in participants)
-
-
-def reconcile(*args: Any, **kwargs: Any) -> Any:
-    if not args:
-        raise TypeError("reconcile() requires at least one argument")
-    first = args[0]
-    # Multiple args, BaseModel instance, or kwargs → resolver
-    if len(args) > 1 or isinstance(first, BaseModel) or kwargs:
-        return _resolve(*args, **kwargs)
-    # Callable (but not FieldInfo) → bare @reconcile decorator (validator)
-    if callable(first) and not isinstance(first, FieldInfo):
-        return Reconciled(first)
-    # Sentinel → @reconcile(sentinel) decorator factory (field derivation)
-    sentinel = first
-
-    def decorator(fn: Callable[..., Any]) -> Any:
-        return Reconciled(fn, sentinel=sentinel)
-
-    return decorator

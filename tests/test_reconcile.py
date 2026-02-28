@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
-from reconcile import reconcile
+from reconcile import dependency, reconcile
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,7 @@ class AdamWOptimizerSpec(BaseModel):
     betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 0.01
 
-    @reconcile
+    @dependency
     def _lr_positive(self, _t: TrainingSpec) -> None:
         if self.lr <= 0:
             raise ValueError(f"lr={self.lr} must be positive")
@@ -42,7 +42,7 @@ class LinearWarmupSchedulerSpec(BaseModel):
     lr_min: float = 0.0
     num_steps: int = Field()
 
-    @reconcile(num_steps)
+    @dependency(num_steps)
     def _(self, t: TrainingSpec) -> int:
         if self.warmup_steps >= t.num_steps:
             raise ValueError(f"warmup ({self.warmup_steps}) >= total ({t.num_steps})")
@@ -56,11 +56,11 @@ class MultiFieldSpec(BaseModel):
     num_steps: int = Field()
     lr: float = Field()
 
-    @reconcile(num_steps)
+    @dependency(num_steps)
     def _derive_num_steps(self, t: TrainingSpec) -> int:
         return t.num_steps
 
-    @reconcile(lr)
+    @dependency(lr)
     def _derive_lr(self, o: AdamWOptimizerSpec) -> float:
         return o.lr
 
