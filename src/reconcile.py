@@ -9,7 +9,7 @@ import typing
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
@@ -104,6 +104,10 @@ def _call(fn: Callable[..., Any], pool: dict[type, Any]) -> Any:
     return fn(**kwargs)
 
 
+def _get_dependencies(cls: type) -> list[tuple[str, Dependency]]:
+    return inspect.getmembers(cls, lambda a: isinstance(a, Dependency))
+
+
 def reconcile(*participants: Any) -> tuple[Any, ...]:
     pool: dict[type, Any] = {}
     for obj in participants:
@@ -112,9 +116,7 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
             raise TypeError(f"Duplicate type {t.__name__} in participants")
         pool[t] = obj
 
-    errors: list[str] = []
-    ran: set[tuple[type, str]] = set()
-
+    # Phase 1: Resolve — compute derived field values until convergence
     while True:
         progress = False
         for obj in list(pool.values()):
@@ -123,31 +125,16 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
             cls = type(obj)
             updates: dict[str, Any] = {}
 
-            for name, meta in inspect.getmembers(
-                type(obj), lambda a: isinstance(a, Dependency)
-            ):
-                field = meta.field_name
-                if field is not None:
-                    if field in obj.model_fields_set:
-                        continue
-                else:
-                    if (cls, name) in ran:
-                        continue
-
+            for _name, meta in _get_dependencies(cls):
+                if meta.field_name is None or meta.field_name in obj.model_fields_set:
+                    continue
                 method = meta.fn.__get__(pool[cls], cls)
                 try:
                     result = _call(method, pool)
                 except Unresolvable:
                     continue
-                except ValueError as e:
-                    label = field or name
-                    errors.append(f"{cls.__name__}.{label}: {e}")
-                    continue
-
-                if field is not None and result is not None:
-                    updates[field] = result
-                else:
-                    ran.add((cls, name))
+                if result is not None:
+                    updates[meta.field_name] = result
 
             if updates:
                 pool[cls] = obj.model_copy(update=updates)
@@ -156,23 +143,36 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
         if not progress:
             break
 
+    # Phase 2: Cross-validate — run dependency validators across objects
     for obj in pool.values():
         if not isinstance(obj, BaseModel):
             continue
         cls = type(obj)
-        for _name, meta in inspect.getmembers(
-            type(obj), lambda a: isinstance(a, Dependency)
-        ):
+        for name, meta in _get_dependencies(cls):
+            if meta.field_name is not None:
+                continue
+            method = meta.fn.__get__(pool[cls], cls)
+            try:
+                _call(method, pool)
+            except Unresolvable:
+                continue
+
+    # Phase 3: Field validate — check completeness and Field constraints
+    for obj in pool.values():
+        if not isinstance(obj, BaseModel):
+            continue
+        cls = type(obj)
+        for _name, meta in _get_dependencies(cls):
             if not meta.required or meta.field_name is None:
                 continue
             if meta.field_name not in obj.model_fields_set:
-                errors.append(
+                raise ValueError(
                     f"{cls.__name__}.{meta.field_name}: required but unresolved"
                 )
-
-    if errors:
-        raise ValueError(
-            "Constraint violations:\n" + "\n".join(f"  - {msg}" for msg in errors)
-        )
+        for field_name in obj.model_fields_set:
+            fi = cls.model_fields[field_name]
+            if fi.metadata:
+                ta = TypeAdapter(typing.Annotated[fi.annotation, *fi.metadata])
+                ta.validate_python(getattr(obj, field_name))
 
     return tuple(pool[type(p)] for p in participants)

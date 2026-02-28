@@ -142,21 +142,35 @@ def test_skip_when_dependency_absent():
     assert sched.num_steps == 500
 
 
-def test_multiple_errors():
-    """8. Multiple errors reported together."""
-    with pytest.raises(ValueError) as exc_info:
+def test_fail_fast():
+    """8. Validation fails fast on first error."""
+    with pytest.raises(ValueError):
         reconcile(
             AdamWOptimizerSpec(lr=0),
             LinearWarmupSchedulerSpec(warmup_steps=5000),
             TrainingSpec(num_steps=2000),
         )
-    msg = str(exc_info.value)
-    assert "lr_positive" in msg
-    assert "num_steps" in msg
+
+
+def test_field_constraints_validated():
+    """9. Field constraints are enforced on reconciled values."""
+
+    class Bounded(BaseModel):
+        value: int = Field(ge=0, le=100)
+
+        @dependency(value)
+        def _(self, t: TrainingSpec) -> int:
+            return t.num_steps
+
+    with pytest.raises(ValueError, match="less than or equal to 100"):
+        reconcile(Bounded(), TrainingSpec(num_steps=9999))
+
+    bounded, _ = reconcile(Bounded(), TrainingSpec(num_steps=50))
+    assert bounded.value == 50
 
 
 def test_model_fields_and_dump():
-    """9. num_steps is a real Pydantic field."""
+    """10. num_steps is a real Pydantic field."""
     assert "num_steps" in LinearWarmupSchedulerSpec.model_fields
     assert LinearWarmupSchedulerSpec().model_dump() == {
         "warmup_steps": 0,
