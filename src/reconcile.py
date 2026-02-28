@@ -19,6 +19,11 @@ from pydantic_core import PydanticUndefined
 # ---------------------------------------------------------------------------
 
 
+# id(FieldInfo) → list[Dependency]: registered at decorator time, consumed
+# by __set_name__ before Pydantic's complete_model_class() reads annotations.
+_registry: dict[int, list[Dependency]] = {}
+
+
 # Inherit property so Pydantic treats us as a descriptor rather than
 # replacing the attribute with ModelPrivateAttr during model creation.
 class Dependency(property):
@@ -29,44 +34,32 @@ class Dependency(property):
     def __init__(self, fn: Callable[..., Any], *, sentinel: Any = None) -> None:
         self.fn = fn
         self._sentinel = sentinel
+        self.field_name = None
+        self.required = False
+        if isinstance(sentinel, FieldInfo):
+            _registry.setdefault(id(sentinel), []).append(self)
 
     def __set_name__(self, owner: type, name: str) -> None:
-        if self._sentinel is None:
-            # Validator: no field binding
-            self.field_name = None
-            self.required = False
-            return
+        _flush(owner)
 
-        ann = dict(owner.__annotations__) if hasattr(owner, "__annotations__") else {}
 
-        field_name = None
-        for fname in ann:
-            if owner.__dict__.get(fname) is self._sentinel:
-                field_name = fname
-                break
-        if field_name is None:
-            raise TypeError(
-                f"{owner.__name__}.{name}: no field found matching sentinel"
-            )
-        self.field_name = field_name
-
-        if not isinstance(self._sentinel, FieldInfo):
-            raise TypeError(
-                f"{owner.__name__}.{field_name}: sentinel must be a pydantic "
-                f"FieldInfo (use Field())"
-            )
-
-        self.required = self._sentinel.default is PydanticUndefined
-        if self.required:
-            # Field() has no default → Pydantic would require it at construction.
-            # Inject default=None via Annotated so reconciliation can fill it later.
-            # This must happen in __set_name__ because complete_model_class()
-            # reads Annotated metadata AFTER __set_name__, while the metaclass
-            # captures namespace defaults BEFORE it.
-            self._sentinel.default = None
-            ann[field_name] = typing.Annotated[ann[field_name], self._sentinel, self]
-            setattr(owner, field_name, None)
-            owner.__annotations__ = ann
+def _flush(owner: type) -> None:
+    ann = dict(owner.__annotations__) if hasattr(owner, "__annotations__") else {}
+    changed = False
+    for fname in list(ann.keys()):
+        fi = owner.__dict__.get(fname)
+        if not isinstance(fi, FieldInfo):
+            continue
+        for dep in _registry.pop(id(fi), []):
+            dep.field_name = fname
+            dep.required = fi.default is PydanticUndefined
+            if dep.required:
+                fi.default = None
+                ann[fname] = typing.Annotated[ann[fname], fi, dep]
+                setattr(owner, fname, None)
+                changed = True
+    if changed:
+        owner.__annotations__ = ann
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +98,14 @@ def _call(fn: Callable[..., Any], pool: dict[type, Any]) -> Any:
 
 
 def _get_dependencies(cls: type) -> list[tuple[str, Dependency]]:
-    return inspect.getmembers(cls, lambda a: isinstance(a, Dependency))
+    deps = inspect.getmembers(cls, lambda a: isinstance(a, Dependency))
+    seen = {id(d) for _, d in deps}
+    for fname, fi in cls.model_fields.items():
+        for m in fi.metadata:
+            if isinstance(m, Dependency) and id(m) not in seen:
+                deps.append((fname, m))
+                seen.add(id(m))
+    return deps
 
 
 def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
