@@ -14,11 +14,6 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 
-# ---------------------------------------------------------------------------
-# Descriptor
-# ---------------------------------------------------------------------------
-
-
 # id(FieldInfo) → list[Dependency]: registered at decorator time, consumed
 # by __set_name__ before Pydantic's complete_model_class() reads annotations.
 _registry: dict[int, list[Dependency]] = {}
@@ -55,16 +50,11 @@ def _flush(owner: type) -> None:
             dep.required = fi.default is PydanticUndefined
             if dep.required:
                 fi.default = None
-                ann[fname] = typing.Annotated[ann[fname], fi, dep]
-                setattr(owner, fname, None)
-                changed = True
+            ann[fname] = typing.Annotated[ann[fname], fi, dep]
+            setattr(owner, fname, fi.default)
+            changed = True
     if changed:
         owner.__annotations__ = ann
-
-
-# ---------------------------------------------------------------------------
-# Decorator
-# ---------------------------------------------------------------------------
 
 
 def dependency(arg: Any = None, /) -> Any:
@@ -76,11 +66,6 @@ def dependency(arg: Any = None, /) -> Any:
         return Dependency(fn, sentinel=sentinel)
 
     return decorator
-
-
-# ---------------------------------------------------------------------------
-# Resolver
-# ---------------------------------------------------------------------------
 
 
 class Unresolvable(Exception):
@@ -121,7 +106,10 @@ def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
         progress = False
         for cls in [type(o) for o in pool.values() if isinstance(o, BaseModel)]:
             for _name, meta in _get_dependencies(cls):
-                if meta.field_name is None or meta.field_name in pool[cls].model_fields_set:
+                if (
+                    meta.field_name is None
+                    or meta.field_name in pool[cls].model_fields_set
+                ):
                     continue
                 method = meta.fn.__get__(pool[cls], cls)
                 try:

@@ -8,10 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from reconcile import dependency, reconcile
 
 
-# ---------------------------------------------------------------------------
-# Test models
-# ---------------------------------------------------------------------------
-
 
 class TrainingSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -55,11 +51,6 @@ class LinearWarmupSchedulerSpec(BaseModel):
 
     def func(self, step: int) -> float:
         return step * self.lr_min
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 def test_cross_object_resolution():
@@ -166,3 +157,31 @@ def test_model_fields_and_dump():
     }
     assert LinearWarmupSchedulerSpec(num_steps=42, lr=0.5).num_steps == 42
     assert LinearWarmupSchedulerSpec(num_steps=42, lr=0.5).lr == 0.5
+
+
+def test_field_default_as_fallback():
+    """11. Field default is used when dependency source is absent."""
+
+    class WithDefaults(BaseModel):
+        num_steps: int = Field(default=1000)
+        lr: float = Field(default=0.001)
+
+        @dependency(num_steps)
+        def _(self, t: TrainingSpec) -> int:
+            return t.num_steps
+
+        @dependency(lr)
+        def _(self, o: AdamWOptimizerSpec) -> float:
+            return o.lr
+
+    # Both sources present → derived values win
+    spec, _, _ = reconcile(
+        WithDefaults(), TrainingSpec(num_steps=5000), AdamWOptimizerSpec(lr=0.01)
+    )
+    assert spec.num_steps == 5000
+    assert spec.lr == 0.01
+
+    # Both sources absent → Field defaults used as fallback
+    (spec,) = reconcile(WithDefaults())
+    assert spec.num_steps == 1000
+    assert spec.lr == 0.001
