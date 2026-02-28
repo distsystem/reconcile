@@ -28,32 +28,24 @@ class Dependency(property):
 
     def __init__(self, fn: Callable[..., Any], *, sentinel: Any = None) -> None:
         self.fn = fn
-        self._sentinel = sentinel
         self.field_name = None
         self.required = False
         if isinstance(sentinel, FieldInfo):
             _registry.setdefault(id(sentinel), []).append(self)
 
     def __set_name__(self, owner: type, name: str) -> None:
-        _flush(owner)
-
-
-def _flush(owner: type) -> None:
-    ann = dict(owner.__annotations__) if hasattr(owner, "__annotations__") else {}
-    changed = False
-    for fname in list(ann.keys()):
-        fi = owner.__dict__.get(fname)
-        if not isinstance(fi, FieldInfo):
-            continue
-        for dep in _registry.pop(id(fi), []):
-            dep.field_name = fname
-            dep.required = fi.default is PydanticUndefined
-            if dep.required:
-                fi.default = None
-            ann[fname] = typing.Annotated[ann[fname], fi, dep]
-            setattr(owner, fname, fi.default)
-            changed = True
-    if changed:
+        ann = dict(owner.__annotations__)
+        for fname in ann:
+            fi = owner.__dict__.get(fname)
+            if not isinstance(fi, FieldInfo):
+                continue
+            for dep in _registry.pop(id(fi), []):
+                dep.field_name = fname
+                dep.required = fi.default is PydanticUndefined
+                if dep.required:
+                    fi.default = None
+                ann[fname] = typing.Annotated[ann[fname], fi, dep]
+                setattr(owner, fname, fi.default)
         owner.__annotations__ = ann
 
 
@@ -101,48 +93,45 @@ def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
             raise TypeError(f"Duplicate type {t.__name__} in participants")
         pool[t] = obj
 
+    model_deps = [
+        (cls, _get_dependencies(cls))
+        for cls in pool
+        if isinstance(pool[cls], BaseModel)
+    ]
+
     # Phase 1: Resolve — compute derived field values until convergence
     while True:
         progress = False
-        for cls in [type(o) for o in pool.values() if isinstance(o, BaseModel)]:
-            for _name, meta in _get_dependencies(cls):
-                if (
-                    meta.field_name is None
-                    or meta.field_name in pool[cls].model_fields_set
-                ):
+        for cls, deps in model_deps:
+            obj = pool[cls]
+            for _, meta in deps:
+                if meta.field_name is None or meta.field_name in obj.model_fields_set:
                     continue
-                method = meta.fn.__get__(pool[cls], cls)
                 try:
-                    result = _call(method, pool)
+                    result = _call(meta.fn.__get__(obj, cls), pool)
                 except Unresolvable:
                     continue
                 if result is not None:
-                    setattr(pool[cls], meta.field_name, result)
+                    setattr(obj, meta.field_name, result)
                     progress = True
-
         if not progress:
             break
 
     # Phase 2: Cross-validate — run dependency validators across objects
-    for obj in pool.values():
-        if not isinstance(obj, BaseModel):
-            continue
-        cls = type(obj)
-        for name, meta in _get_dependencies(cls):
+    for cls, deps in model_deps:
+        obj = pool[cls]
+        for _, meta in deps:
             if meta.field_name is not None:
                 continue
-            method = meta.fn.__get__(pool[cls], cls)
             try:
-                _call(method, pool)
+                _call(meta.fn.__get__(obj, cls), pool)
             except Unresolvable:
                 continue
 
     # Phase 3: Field validate — check completeness and Field constraints
-    for obj in pool.values():
-        if not isinstance(obj, BaseModel):
-            continue
-        cls = type(obj)
-        for _name, meta in _get_dependencies(cls):
+    for cls, deps in model_deps:
+        obj = pool[cls]
+        for _, meta in deps:
             if not meta.required or meta.field_name is None:
                 continue
             if meta.field_name not in obj.model_fields_set:
