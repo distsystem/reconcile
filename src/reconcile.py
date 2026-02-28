@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 
 # ---------------------------------------------------------------------------
@@ -21,8 +22,6 @@ from pydantic.fields import FieldInfo
 # Inherit property so Pydantic treats us as a descriptor rather than
 # replacing the attribute with ModelPrivateAttr during model creation.
 class Reconciled(property):
-    UNRESOLVED: Any = object()
-
     fn: Callable[..., Any]
     field_name: str | None
     required: bool
@@ -54,21 +53,20 @@ class Reconciled(property):
         if not isinstance(self._sentinel, FieldInfo):
             raise TypeError(
                 f"{owner.__name__}.{field_name}: sentinel must be a pydantic "
-                f"FieldInfo (use Field(default=Reconciled.UNRESOLVED))"
+                f"FieldInfo (use Field())"
             )
 
-        self.required = self._sentinel.default is Reconciled.UNRESOLVED
-        # Replace sentinel with valid default so Pydantic validation accepts it
+        self.required = self._sentinel.default is PydanticUndefined
         if self.required:
+            # Field() has no default → Pydantic would require it at construction.
+            # Inject default=None via Annotated so reconciliation can fill it later.
+            # This must happen in __set_name__ because complete_model_class()
+            # reads Annotated metadata AFTER __set_name__, while the metaclass
+            # captures namespace defaults BEFORE it.
             self._sentinel.default = None
-        # Move FieldInfo from class-body value into Annotated metadata,
-        # where Pydantic's model metaclass picks it up
-        ann[field_name] = typing.Annotated[ann[field_name], self._sentinel, self]
-        # Replace descriptor on the class with a plain default so
-        # BaseModel.__init__ sees a normal attribute, not our sentinel
-        setattr(owner, field_name, None)
-
-        owner.__annotations__ = ann
+            ann[field_name] = typing.Annotated[ann[field_name], self._sentinel, self]
+            setattr(owner, field_name, None)
+            owner.__annotations__ = ann
 
 
 # ---------------------------------------------------------------------------

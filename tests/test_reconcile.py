@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
-from reconcile import Reconciled, reconcile
+from reconcile import reconcile
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ class AdamWOptimizerSpec(BaseModel):
 class LinearWarmupSchedulerSpec(BaseModel):
     warmup_steps: int = 0
     lr_min: float = 0.0
-    num_steps: int = Field(default=Reconciled.UNRESOLVED)
+    num_steps: int = Field()
 
     @reconcile(num_steps)
     def _(self, t: TrainingSpec) -> int:
@@ -53,8 +53,8 @@ class LinearWarmupSchedulerSpec(BaseModel):
 
 
 class MultiFieldSpec(BaseModel):
-    num_steps: int = Field(default=Reconciled.UNRESOLVED)
-    lr: float = Field(default=Reconciled.UNRESOLVED)
+    num_steps: int = Field()
+    lr: float = Field()
 
     @reconcile(num_steps)
     def _derive_num_steps(self, t: TrainingSpec) -> int:
