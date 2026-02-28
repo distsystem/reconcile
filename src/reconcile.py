@@ -108,7 +108,7 @@ def _get_dependencies(cls: type) -> list[tuple[str, Dependency]]:
     return inspect.getmembers(cls, lambda a: isinstance(a, Dependency))
 
 
-def reconcile(*participants: Any) -> tuple[Any, ...]:
+def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
     pool: dict[type, Any] = {}
     for obj in participants:
         t = type(obj)
@@ -119,14 +119,9 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
     # Phase 1: Resolve — compute derived field values until convergence
     while True:
         progress = False
-        for obj in list(pool.values()):
-            if not isinstance(obj, BaseModel):
-                continue
-            cls = type(obj)
-            updates: dict[str, Any] = {}
-
+        for cls in [type(o) for o in pool.values() if isinstance(o, BaseModel)]:
             for _name, meta in _get_dependencies(cls):
-                if meta.field_name is None or meta.field_name in obj.model_fields_set:
+                if meta.field_name is None or meta.field_name in pool[cls].model_fields_set:
                     continue
                 method = meta.fn.__get__(pool[cls], cls)
                 try:
@@ -134,11 +129,8 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
                 except Unresolvable:
                     continue
                 if result is not None:
-                    updates[meta.field_name] = result
-
-            if updates:
-                pool[cls] = obj.model_copy(update=updates)
-                progress = True
+                    setattr(pool[cls], meta.field_name, result)
+                    progress = True
 
         if not progress:
             break
@@ -175,4 +167,4 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
                 ta = TypeAdapter(typing.Annotated[fi.annotation, *fi.metadata])
                 ta.validate_python(getattr(obj, field_name))
 
-    return tuple(pool[type(p)] for p in participants)
+    return participants
