@@ -90,25 +90,18 @@ def dependency(arg: Any = None, /) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _inject_from_pool(
-    fn: Callable[..., Any], pool: dict[type, Any]
-) -> tuple[bool, dict[str, Any]]:
+class Unresolvable(Exception):
+    pass
+
+
+def _call(fn: Callable[..., Any], pool: dict[type, Any]) -> Any:
     hints = typing.get_type_hints(fn)
-    kwargs: dict[str, Any] = {}
-    for param in inspect.signature(fn).parameters.values():
-        annotation = hints.get(param.name, param.annotation)
-        if annotation is inspect.Parameter.empty or annotation not in pool:
-            return False, {}
-        kwargs[param.name] = pool[annotation]
-    return True, kwargs
-
-
-def _find_dependencies(obj: Any) -> list[tuple[str, Dependency]]:
-    return [
-        (name, attr)
-        for name in dir(type(obj))
-        if isinstance(attr := getattr(type(obj), name, None), Dependency)
-    ]
+    hints.pop("return", None)
+    try:
+        kwargs = {p: pool[t] for p, t in hints.items()}
+    except KeyError:
+        raise Unresolvable
+    return fn(**kwargs)
 
 
 def reconcile(*participants: Any) -> tuple[Any, ...]:
@@ -130,7 +123,9 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
             cls = type(obj)
             updates: dict[str, Any] = {}
 
-            for name, meta in _find_dependencies(obj):
+            for name, meta in inspect.getmembers(
+                type(obj), lambda a: isinstance(a, Dependency)
+            ):
                 field = meta.field_name
                 if field is not None:
                     if field in obj.model_fields_set:
@@ -140,11 +135,10 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
                         continue
 
                 method = meta.fn.__get__(pool[cls], cls)
-                resolvable, kwargs = _inject_from_pool(method, pool)
-                if not resolvable:
-                    continue
                 try:
-                    result = method(**kwargs)
+                    result = _call(method, pool)
+                except Unresolvable:
+                    continue
                 except ValueError as e:
                     label = field or name
                     errors.append(f"{cls.__name__}.{label}: {e}")
@@ -166,14 +160,12 @@ def reconcile(*participants: Any) -> tuple[Any, ...]:
         if not isinstance(obj, BaseModel):
             continue
         cls = type(obj)
-        for _name, meta in _find_dependencies(obj):
+        for _name, meta in inspect.getmembers(
+            type(obj), lambda a: isinstance(a, Dependency)
+        ):
             if not meta.required or meta.field_name is None:
                 continue
-            if meta.field_name in obj.model_fields_set:
-                continue
-            method = meta.fn.__get__(obj, cls)
-            resolvable, _ = _inject_from_pool(method, pool)
-            if not resolvable:
+            if meta.field_name not in obj.model_fields_set:
                 errors.append(
                     f"{cls.__name__}.{meta.field_name}: required but unresolved"
                 )
