@@ -64,14 +64,36 @@ class Unresolvable(Exception):
     pass
 
 
-def _call(fn: Callable[..., Any], pool: dict[type, Any]) -> Any:
-    hints = typing.get_type_hints(fn)
-    hints.pop("return", None)
-    try:
-        kwargs = {p: pool[t] for p, t in hints.items()}
-    except KeyError:
-        raise Unresolvable
-    return fn(**kwargs)
+class Pool:
+    _EXCLUDED: typing.ClassVar[set[type]] = {object, BaseModel}
+
+    def __init__(self, participants: tuple[Any, ...]) -> None:
+        self._data: dict[type, list[Any]] = {}
+        for obj in participants:
+            for cls in type(obj).__mro__:
+                if cls in self._EXCLUDED:
+                    continue
+                self._data.setdefault(cls, []).append(obj)
+
+    def resolve(self, requested: type) -> Any:
+        candidates = self._data.get(requested, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            names = ", ".join(type(c).__name__ for c in candidates)
+            raise TypeError(
+                f"Ambiguous: multiple candidates for {requested.__name__}: {names}"
+            )
+        raise KeyError(requested)
+
+    def call(self, fn: Callable[..., Any]) -> Any:
+        hints = typing.get_type_hints(fn)
+        hints.pop("return", None)
+        try:
+            kwargs = {p: self.resolve(t) for p, t in hints.items()}
+        except KeyError:
+            raise Unresolvable
+        return fn(**kwargs)
 
 
 def _get_dependencies(cls: type) -> list[tuple[str, Dependency]]:
@@ -86,29 +108,23 @@ def _get_dependencies(cls: type) -> list[tuple[str, Dependency]]:
 
 
 def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
-    pool: dict[type, Any] = {}
-    for obj in participants:
-        t = type(obj)
-        if t in pool:
-            raise TypeError(f"Duplicate type {t.__name__} in participants")
-        pool[t] = obj
+    pool = Pool(participants)
 
     model_deps = [
-        (cls, _get_dependencies(cls))
-        for cls in pool
-        if isinstance(pool[cls], BaseModel)
+        (type(obj), obj, _get_dependencies(type(obj)))
+        for obj in participants
+        if isinstance(obj, BaseModel)
     ]
 
     # Phase 1: Resolve — compute derived field values until convergence
     while True:
         progress = False
-        for cls, deps in model_deps:
-            obj = pool[cls]
+        for cls, obj, deps in model_deps:
             for _, meta in deps:
                 if meta.field_name is None or meta.field_name in obj.model_fields_set:
                     continue
                 try:
-                    result = _call(meta.fn.__get__(obj, cls), pool)
+                    result = pool.call(meta.fn.__get__(obj, cls))
                 except Unresolvable:
                     continue
                 if result is not None:
@@ -118,19 +134,17 @@ def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
             break
 
     # Phase 2: Cross-validate — run dependency validators across objects
-    for cls, deps in model_deps:
-        obj = pool[cls]
+    for cls, obj, deps in model_deps:
         for _, meta in deps:
             if meta.field_name is not None:
                 continue
             try:
-                _call(meta.fn.__get__(obj, cls), pool)
+                pool.call(meta.fn.__get__(obj, cls))
             except Unresolvable:
                 continue
 
     # Phase 3: Field validate — check completeness and Field constraints
-    for cls, deps in model_deps:
-        obj = pool[cls]
+    for cls, obj, deps in model_deps:
         for _, meta in deps:
             if not meta.required or meta.field_name is None:
                 continue

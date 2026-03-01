@@ -91,8 +91,8 @@ def test_multi_participant():
 
 def test_duplicate_type():
     """4. Error: duplicate type."""
-    with pytest.raises(TypeError, match="Duplicate type"):
-        reconcile(TrainingSpec(), TrainingSpec())
+    with pytest.raises(TypeError, match="Ambiguous"):
+        reconcile(TrainingSpec(), TrainingSpec(), AdamWOptimizerSpec())
 
 
 def test_required_unresolved():
@@ -157,6 +157,55 @@ def test_model_fields_and_dump():
     }
     assert LinearWarmupSchedulerSpec(num_steps=42, lr=0.5).num_steps == 42
     assert LinearWarmupSchedulerSpec(num_steps=42, lr=0.5).lr == 0.5
+
+
+def test_subclass_resolution():
+    """11. Subclass in pool satisfies base-class hint."""
+
+    class BaseLoss(BaseModel):
+        weight: float = 1.0
+
+    class MSELoss(BaseLoss):
+        reduction: str = "mean"
+
+        @dependency
+        def _check(self, _t: TrainingSpec) -> None:
+            pass
+
+    loss, _ = reconcile(MSELoss(), TrainingSpec())
+    assert isinstance(loss, MSELoss)
+    assert loss.weight == 1.0
+
+
+def test_subclass_ambiguity_error():
+    """12. Multiple subclasses for same base → TypeError; split into two reconciles."""
+
+    class BaseLoss(BaseModel):
+        weight: float = 1.0
+
+    class MSELoss(BaseLoss):
+        pass
+
+    class MAELoss(BaseLoss):
+        pass
+
+    class NeedsLoss(BaseModel):
+        name: str = Field()
+
+        @dependency(name)
+        def _(self, loss: BaseLoss) -> str:
+            return type(loss).__name__
+
+    with pytest.raises(TypeError, match="Ambiguous"):
+        reconcile(NeedsLoss(), MSELoss(), MAELoss())
+
+    # Split into separate scopes; reconcile mutates in-place so a
+    # second call on the same object sees fields set by the first.
+    a, mse, mae = NeedsLoss(), MSELoss(), MAELoss()
+    reconcile(a, mse)
+    assert a.name == "MSELoss"
+    reconcile(a, mae)
+    assert a.name == "MSELoss"  # already set, not overwritten
 
 
 def test_field_default_as_fallback():
