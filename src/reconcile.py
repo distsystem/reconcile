@@ -69,6 +69,7 @@ class Pool:
 
     def __init__(self, participants: tuple[Any, ...]) -> None:
         self._data: dict[type, list[Any]] = {}
+        self._deps: dict[type, list[Dependency]] = {}
         for obj in participants:
             for cls in type(obj).__mro__:
                 if cls in self._EXCLUDED:
@@ -95,32 +96,29 @@ class Pool:
             raise Unresolvable
         return fn(**kwargs)
 
-
-def _get_dependencies(cls: type) -> list[tuple[str, Dependency]]:
-    deps = inspect.getmembers(cls, lambda a: isinstance(a, Dependency))
-    seen = {id(d) for _, d in deps}
-    for fname, fi in cls.model_fields.items():
-        for m in fi.metadata:
-            if isinstance(m, Dependency) and id(m) not in seen:
-                deps.append((fname, m))
-                seen.add(id(m))
-    return deps
+    def deps(self, cls: type) -> list[Dependency]:
+        if cls not in self._deps:
+            result = [d for _, d in inspect.getmembers(cls, lambda a: isinstance(a, Dependency))]
+            seen = {id(d) for d in result}
+            for fi in cls.model_fields.values():
+                for m in fi.metadata:
+                    if isinstance(m, Dependency) and id(m) not in seen:
+                        result.append(m)
+                        seen.add(id(m))
+            self._deps[cls] = result
+        return self._deps[cls]
 
 
 def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
     pool = Pool(participants)
-
-    model_deps = [
-        (type(obj), obj, _get_dependencies(type(obj)))
-        for obj in participants
-        if isinstance(obj, BaseModel)
-    ]
+    models = [obj for obj in participants if isinstance(obj, BaseModel)]
 
     # Phase 1: Resolve — compute derived field values until convergence
     while True:
         progress = False
-        for cls, obj, deps in model_deps:
-            for _, meta in deps:
+        for obj in models:
+            cls = type(obj)
+            for meta in pool.deps(cls):
                 if meta.field_name is None or meta.field_name in obj.model_fields_set:
                     continue
                 try:
@@ -134,8 +132,9 @@ def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
             break
 
     # Phase 2: Cross-validate — run dependency validators across objects
-    for cls, obj, deps in model_deps:
-        for _, meta in deps:
+    for obj in models:
+        cls = type(obj)
+        for meta in pool.deps(cls):
             if meta.field_name is not None:
                 continue
             try:
@@ -144,8 +143,9 @@ def reconcile[*Ts](*participants: *Ts) -> tuple[*Ts]:
                 continue
 
     # Phase 3: Field validate — check completeness and Field constraints
-    for cls, obj, deps in model_deps:
-        for _, meta in deps:
+    for obj in models:
+        cls = type(obj)
+        for meta in pool.deps(cls):
             if not meta.required or meta.field_name is None:
                 continue
             if meta.field_name not in obj.model_fields_set:
